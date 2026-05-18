@@ -250,6 +250,9 @@ class TrainingBatch:
     # Training outputs
     total_loss: float | None = None
     grad_norm: float | None = None
+    did_optimizer_step: bool = False
+    optimizer_step_skipped: bool = False
+    flowmap_debug_metrics: dict[str, float] = field(default_factory=dict)
     generator_grad_norm: float | None = None
     fake_grad_norm: float | None = None
 

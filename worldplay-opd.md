@@ -306,15 +306,281 @@ This also means that before running a longer Stage-1 flow-map training job, we s
 
 #### Priority before real Stage-1 training
 
-Recommended order:
+<details>
+<summary>Recommended order</summary>
 
-1. Add explicit logging for whether `optimizer.step()` actually ran.
-2. Run one ordinary causal smoke and one flow-map smoke with that metric, so we no longer infer step-skips indirectly from `grad_norm`.
-3. Fix flow-map timestep sampling to WorldPlay chunk granularity.
-4. Port the original outside-window timestep handling into the flow-map path.
-5. Change two-time embedding from additive scaling to an AnyFlow-compatible bounded mixture.
-6. Add debug logs for `model_pred`, `target`, `dF_dt`, `t-r`, and loss by flow-map sample type.
-7. Only after the above, run a multi-step smoke and confirm at least one real optimizer update occurs.
+- ✅ Add explicit logging for whether `optimizer.step()` actually ran.
+- ✅ Run one ordinary causal smoke and one flow-map smoke with that metric, so we no longer infer step-skips indirectly from `grad_norm`.
+- ✅ Fix flow-map timestep sampling to WorldPlay chunk granularity.
+- ✅ Port the original outside-window timestep handling into the flow-map path.
+- ✅ Change two-time embedding from additive scaling to an AnyFlow-compatible bounded mixture.
+- ✅ Add debug logs for `model_pred`, `target`, `dF_dt`, `t-r`, and loss by flow-map sample type.
+- ✅ Make the action grad-skip threshold configurable and add a debug bypass.
+- ⬜ Run a multi-step smoke and confirm at least one real optimizer update occurs.
+
+</details>
+
+### 1.6 Stage-1 v1.1 implementation update
+
+The next implementation pass addressed the first four concrete blockers above while keeping the original ordinary causal student training entry intact.
+
+Changed files:
+
+- `trainer/pipelines/pipeline_batch_info.py`
+- `trainer/training/ar_hunyuan_mem_training_pipeline.py`
+- `trainer/training/ar_hunyuan_flowmap_training_pipeline.py`
+- `trainer/models/hyvideo/models/transformers/ar_action_hunyuanvideo_1_5_transformer.py`
+
+#### Optimizer-step visibility
+
+Training batches now carry:
+
+```python
+did_optimizer_step: bool
+optimizer_step_skipped: bool
+```
+
+The shared AR training loop logs these values to the progress bar and wandb. When `grad_norm >= 10` under `action=True`, the printed diagnostic now explicitly includes `optimizer_step_skipped True`. This is intentionally implemented in the shared base pipeline, so both ordinary causal training and flow-map training expose the same signal.
+
+#### Chunk-level `(t, r)` sampling
+
+The flow-map branch no longer samples an independent `(t, r)` for every latent frame. It now samples at WorldPlay's 4-latent chunk granularity and repeats the sampled timestep across each chunk:
+
+```text
+chunk timestep sample -> repeat over 4 latent frames -> flatten to transformer timestep vector
+```
+
+This better matches the original WorldPlay causal training path, where timestep noise is piecewise constant over 4-latent chunks.
+
+#### Outside-window timestep handling
+
+For `select_window_out_flag == 1`, the flow-map path now mirrors the original causal memory-training behavior more closely:
+
+- previous chunks before the final 4-latent current chunk receive random high timesteps sampled from scheduler indices `[500, 985)`;
+- both `timestep` and `r_timestep` are forced to the same high value for those previous chunks;
+- the loss mask still applies only to the final 4-latent chunk.
+
+This keeps the previous-context/memory branch closer to the original long-video causal student training semantics.
+
+#### AnyFlow-style bounded two-time embedding
+
+The first flow-map implementation used:
+
+```python
+vec = emb(t) + gate * emb_r(r)
+```
+
+After checking AnyFlow's `WanTwoTimeTextImageEmbedding`, the WorldPlay transformer now uses the bounded mixture:
+
+```python
+vec = (1 - gate) * emb(t) + gate * emb_r(delta)
+```
+
+where `delta` is either:
+
+- `r` when `flowmap_deltatime_type == "r"`;
+- `t - r` when `flowmap_deltatime_type == "t-r"`.
+
+The default remains `gate = 0.25` and `deltatime_type = "r"`, matching the current flow-map config.
+
+#### v1.1 smoke result
+
+Command shape:
+
+```bash
+cd /workspace/WorldPolicy/HY-WorldPlay
+TRAIN_JSON_PATH=/workspace/WorldPolicy/HY-WorldPlay/datasets/preprocessed_gamefactory_sample10_f129/dataset_index.json \
+OUTPUT_DIR=/workspace/WorldPolicy/HY-WorldPlay/local_models/flowmap_causal_student_gamefactory_v2_smoke_20260518_034436 \
+MAX_TRAIN_STEPS=1 \
+CHECKPOINTING_STEPS=1 \
+NUM_GPUS=2 \
+CUDA_VISIBLE_DEVICES=0,1 \
+WANDB_MODE=offline \
+bash scripts/training/hyvideo15/run_ar_hunyuan_action_mem_flowmap.sh
+```
+
+Result:
+
+```text
+output:                  local_models/flowmap_causal_student_gamefactory_v2_smoke_20260518_034436
+checkpoint:              checkpoint-1/transformer/diffusion_pytorch_model.safetensors
+loss:                    1.72025
+step_time:               48.58s
+grad_norm:               2.3157e18
+did_optimizer_step:      0
+optimizer_step_skipped:  1
+```
+
+Interpretation:
+
+- The v1.1 implementation runs through forward, backward, explicit step-skip logging, and checkpointing.
+- The loss is lower than the first flow-map smoke (`2.03164 -> 1.72025`), but this is only a one-sample smoke and should not be overinterpreted.
+- The important confirmed blocker is now explicit: the shared WorldPlay action-training grad gate still skips the optimizer update because the pre-clipping `grad_norm` is far above `10`.
+- The saved v1.1 checkpoint is therefore still a plumbing checkpoint, not proof of a parameter-updated flow-map student.
+
+Next immediate debugging target:
+
+1. Log norm scale before the loss backward path: `model_pred`, `target`, `v_pred`, `dF_dt`, and `t-r`. Done in v1.2.
+2. Compare original causal target norm and flow-map target norm on the same batch. Partially done for the diffusion bucket, where `target == v_pred`.
+3. Decide whether to relax/parameterize the `grad_norm < 10` action gate for smoke/debug runs, or to fix the upstream scale first.
+4. After at least one real `did_optimizer_step=1` smoke, run a short multi-step training job.
+
+### 1.7 Stage-1 v1.2 norm debugging
+
+The v1.2 pass adds flow-map scale diagnostics directly inside `_transformer_forward_and_compute_loss()` before `loss.backward()`.
+
+The logged metrics include:
+
+- `flowmap_debug/model_pred_abs_mean`, `rms`, `abs_max`
+- `flowmap_debug/target_abs_mean`, `rms`, `abs_max`
+- `flowmap_debug/v_pred_abs_mean`, `rms`, `abs_max`
+- `flowmap_debug/dF_dt_abs_mean`, `rms`, `abs_max`
+- `flowmap_debug/t_minus_r_abs_mean`, `rms`, `abs_max`
+- masked versions of model/target statistics
+- `flowmap_debug/diff_abs_mean`
+- `flowmap_debug/timestep_abs_mean`
+- `flowmap_debug/r_timestep_abs_mean`
+
+These are stored in `training_batch.flowmap_debug_metrics`, printed on rank 0, and sent to wandb from the shared training loop.
+
+#### v1.2 smoke result
+
+Command shape:
+
+```bash
+cd /workspace/WorldPolicy/HY-WorldPlay
+TRAIN_JSON_PATH=/workspace/WorldPolicy/HY-WorldPlay/datasets/preprocessed_gamefactory_sample10_f129/dataset_index.json \
+OUTPUT_DIR=/workspace/WorldPolicy/HY-WorldPlay/local_models/flowmap_causal_student_gamefactory_debugnorm_smoke_20260518_035817 \
+MAX_TRAIN_STEPS=1 \
+CHECKPOINTING_STEPS=1 \
+NUM_GPUS=2 \
+CUDA_VISIBLE_DEVICES=0,1 \
+WANDB_MODE=offline \
+bash scripts/training/hyvideo15/run_ar_hunyuan_action_mem_flowmap.sh
+```
+
+Result:
+
+```text
+output:                  local_models/flowmap_causal_student_gamefactory_debugnorm_smoke_20260518_035817
+checkpoint:              checkpoint-1/transformer/diffusion_pytorch_model.safetensors
+loss:                    1.7203
+step_time:               51.24s
+grad_norm:               2.3419e18
+did_optimizer_step:      0
+optimizer_step_skipped:  1
+```
+
+Key debug metrics:
+
+```text
+model_pred_rms:          1.0045
+target_rms:              1.6496
+v_pred_rms:              1.6496
+dF_dt_rms:               0.0361
+t_minus_r_rms:           0.0000
+masked_model_pred_rms:   0.2483
+masked_target_rms:       0.6876
+diff_abs_mean:           0.2867
+timestep_abs_mean:       249.5
+r_timestep_abs_mean:     249.5
+```
+
+Interpretation:
+
+- This smoke landed in the diffusion bucket (`t-r = 0`), so the flow-map target reduced to the ordinary velocity target: `target == v_pred`.
+- The target/model scales are not exploding: `target_rms ~= 1.65`, `model_pred_rms ~= 1.00`, and `dF_dt_rms ~= 0.036`.
+- Therefore this particular huge `grad_norm` is unlikely to be caused by an obviously exploding flow-map target.
+- Because the original ordinary causal smoke also produced `grad_norm ~= 8.94e17`, the current evidence points more strongly at the inherited action-training grad gate / FSDP norm accounting / full-model Muon update scale than at flow-map target scale.
+- We still need a non-diffusion bucket sample (`t-r > 0`) to validate the general flow-map target term. For deterministic debugging, temporarily setting `flowmap_diffusion_ratio=0` would force non-diffusion samples.
+
+Recommended next action:
+
+1. Add a smoke/debug-only CLI switch to bypass or parameterize the `grad_norm < 10` action gate. Done in v2.
+2. Run one debug smoke with the gate disabled after clipping to confirm parameters can update without NaNs. Done in v2.
+3. Run one non-diffusion flow-map smoke (`diffusion_ratio=0`, likely `consistency_ratio=0` or `0.25`) and compare target/dF_dt scale.
+4. If update is numerically stable, keep the gate configurable for research runs instead of hard-coded. Done in v2.
+
+### 1.8 Stage-1 v2 optimizer-step fix
+
+The root issue was not that the flow-map target scale was obviously exploding. The immediate blocker was the inherited hard-coded action-training optimizer-step gate:
+
+```python
+if grad_norm < 10.0 or not action:
+    optimizer.step()
+```
+
+Because `clip_grad_norm_` returns the pre-clipping total norm, this gate skipped the update even after gradients were clipped. The fix keeps the original default behavior, but makes it configurable and debuggable.
+
+New training args:
+
+```text
+--action_grad_skip_threshold 10.0
+--debug_disable_action_grad_skip False
+```
+
+The flow-map launch script exposes these via env vars:
+
+```bash
+ACTION_GRAD_SKIP_THRESHOLD=10.0
+DEBUG_DISABLE_ACTION_GRAD_SKIP=False
+```
+
+For debug smoke runs, use:
+
+```bash
+DEBUG_DISABLE_ACTION_GRAD_SKIP=True
+```
+
+This means:
+
+- default training still preserves the original WorldPlay safety gate;
+- smoke/debug runs can intentionally step after gradient clipping;
+- `did_optimizer_step` and `optimizer_step_skipped` make the behavior explicit.
+
+#### v2 smoke result
+
+Command shape:
+
+```bash
+cd /workspace/WorldPolicy/HY-WorldPlay
+TRAIN_JSON_PATH=/workspace/WorldPolicy/HY-WorldPlay/datasets/preprocessed_gamefactory_sample10_f129/dataset_index.json \
+OUTPUT_DIR=/workspace/WorldPolicy/HY-WorldPlay/local_models/flowmap_causal_student_gamefactory_stepenabled_smoke_20260518_041350 \
+MAX_TRAIN_STEPS=1 \
+CHECKPOINTING_STEPS=1 \
+NUM_GPUS=2 \
+CUDA_VISIBLE_DEVICES=0,1 \
+WANDB_MODE=offline \
+DEBUG_DISABLE_ACTION_GRAD_SKIP=True \
+bash scripts/training/hyvideo15/run_ar_hunyuan_action_mem_flowmap.sh
+```
+
+Result:
+
+```text
+output:                  local_models/flowmap_causal_student_gamefactory_stepenabled_smoke_20260518_041350
+checkpoint:              checkpoint-1/transformer/diffusion_pytorch_model.safetensors
+loss:                    1.7203
+step_time:               56.41s
+grad_norm:               2.2e18
+did_optimizer_step:      1
+optimizer_step_skipped:  0
+```
+
+The run completed forward, backward, gradient clipping, Muon optimizer step, LR scheduler step, distributed checkpoint save, and consolidated checkpoint save without NaNs or runtime failure.
+
+Working conclusion:
+
+- The immediate "no real training update" blocker is fixed for debug/smoke runs.
+- The huge pre-clipping `grad_norm` is still present and should remain visible, but it no longer silently prevents a deliberately enabled debug update.
+- Before a longer real run, keep `did_optimizer_step` in the logs and decide whether production flow-map training should use the original `10.0` threshold, a higher threshold, or staged gate disabling.
+- Still run a non-diffusion sample smoke to inspect the true flow-map transition term where `t-r > 0`.
+
+Summary phrase:
+
+```text
+v2: configurable grad-gate debug step, 4-latent flow-map timestep, bounded two-time embedding
+```
 
 ## Stage 2: OPD on the Flow-Map Causal Student
 

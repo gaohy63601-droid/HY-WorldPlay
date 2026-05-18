@@ -691,6 +691,8 @@ class TrainingArgs(TrainerArgs):
     wandb_key: str = "f8f8f614d325bd04540f8517b142ca942b21017a"
     wandb_entity: str = "zhyzhy"
     action: bool = False
+    action_grad_skip_threshold: float = 10.0
+    debug_disable_action_grad_skip: bool = False
     use_memory: bool = False
     i2v_rate: float = 0.0
     train_time_shift: float = 1.0
@@ -1119,6 +1121,13 @@ class TrainingArgs(TrainerArgs):
                             type=float,
                             default=TrainingArgs.flowmap_epsilon,
                             help="Central-difference epsilon in scheduler steps")
+        parser.add_argument("--action-grad-skip-threshold",
+                            type=float,
+                            default=TrainingArgs.action_grad_skip_threshold,
+                            help="Grad-norm threshold for action training optimizer step")
+        parser.add_argument("--debug-disable-action-grad-skip",
+                            action=StoreBoolean,
+                            help="Disable the action grad-norm gate for debug smoke runs")
         return parser
 
 

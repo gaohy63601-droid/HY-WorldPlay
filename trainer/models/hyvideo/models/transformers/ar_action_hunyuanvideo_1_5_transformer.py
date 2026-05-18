@@ -815,6 +815,24 @@ class ARHunyuanVideo_1_5_DiffusionTransformer(ModelMixin, ConfigMixin):
         vec_txt = self.time_in(timestep_txt) # 为了txt prompt单独计算
         vec = self.time_in(t)
 
+        if timestep_r is not None:
+            if self.time_r_in is None:
+                raise ValueError(
+                    "timestep_r was provided, but time_r_in is not initialized. "
+                    "Enable use_meanflow or call setup_flowmap_time_embedding()."
+                )
+            flowmap_gate_value = getattr(self, "flowmap_gate_value", 0.25)
+            flowmap_deltatime_type = getattr(self, "flowmap_deltatime_type", "r")
+            if flowmap_deltatime_type == "r":
+                delta_timestep = timestep_r
+            elif flowmap_deltatime_type == "t-r":
+                delta_timestep = t - timestep_r
+            else:
+                raise NotImplementedError(
+                    f"Unsupported flowmap_deltatime_type: {flowmap_deltatime_type}"
+                )
+            vec = (1.0 - flowmap_gate_value) * vec + flowmap_gate_value * self.time_r_in(delta_timestep)
+
         if text_states_2 is not None:
             vec_2 = self.vector_in(text_states_2)
             vec = vec + vec_2
@@ -825,15 +843,6 @@ class ARHunyuanVideo_1_5_DiffusionTransformer(ModelMixin, ConfigMixin):
                     "Didn't get guidance strength for guidance distilled model."
                 )
             vec = vec + self.guidance_in(guidance)
-
-        if timestep_r is not None:
-            if self.time_r_in is None:
-                raise ValueError(
-                    "timestep_r was provided, but time_r_in is not initialized. "
-                    "Enable use_meanflow or call setup_flowmap_time_embedding()."
-                )
-            flowmap_gate_value = getattr(self, "flowmap_gate_value", 1.0)
-            vec = vec + flowmap_gate_value * self.time_r_in(timestep_r)
 
         vec = vec + self.action_in(action) # 添加离散的action
 

@@ -24,6 +24,8 @@ CHECKPOINTING_STEPS="${CHECKPOINTING_STEPS:-500}"
 WANDB_KEY="${WANDB_KEY:-}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
 WANDB_PROJECT="${WANDB_PROJECT:-worldplay-flowmap-causal-student}"
+ACTION_GRAD_SKIP_THRESHOLD="${ACTION_GRAD_SKIP_THRESHOLD:-10.0}"
+DEBUG_DISABLE_ACTION_GRAD_SKIP="${DEBUG_DISABLE_ACTION_GRAD_SKIP:-False}"
 
 NUM_GPUS="${NUM_GPUS:-2}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
@@ -58,6 +60,8 @@ training_args=(
   --flowmap_diffusion_ratio 0.5
   --flowmap_consistency_ratio 0.25
   --flowmap_epsilon 5.0
+  --action_grad_skip_threshold "$ACTION_GRAD_SKIP_THRESHOLD"
+  --debug_disable_action_grad_skip "$DEBUG_DISABLE_ACTION_GRAD_SKIP"
 )
 
 parallel_args=(

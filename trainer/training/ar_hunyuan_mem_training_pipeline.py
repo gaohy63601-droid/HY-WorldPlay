@@ -534,10 +534,27 @@ class TrainingPipeline(LoRAPipeline, ABC):
         dist.all_reduce(grad_norm, op=dist.ReduceOp.MAX)
         training_batch.grad_norm = grad_norm.item()
 
-        if self.global_rank == 0 and training_batch.grad_norm >= 10.0:
-            print(self.global_rank, training_batch.grad_norm, training_batch.current_timestep, training_batch.video_path)
+        grad_skip_threshold = getattr(self.training_args, "action_grad_skip_threshold", 10.0)
+        disable_action_grad_skip = getattr(self.training_args, "debug_disable_action_grad_skip", False)
+        did_optimizer_step = (
+            disable_action_grad_skip
+            or (not self.action)
+            or training_batch.grad_norm < grad_skip_threshold
+        )
+        training_batch.did_optimizer_step = did_optimizer_step
+        training_batch.optimizer_step_skipped = not did_optimizer_step
 
-        if training_batch.grad_norm < 10.0 or (not self.action): 
+        if self.global_rank == 0 and training_batch.grad_norm >= grad_skip_threshold and not disable_action_grad_skip:
+            print(
+                self.global_rank,
+                training_batch.grad_norm,
+                training_batch.current_timestep,
+                training_batch.video_path,
+                "optimizer_step_skipped",
+                training_batch.optimizer_step_skipped,
+            )
+
+        if did_optimizer_step:
             self.optimizer.step()
             self.lr_scheduler.step()
 
@@ -624,6 +641,8 @@ class TrainingPipeline(LoRAPipeline, ABC):
 
             loss = training_batch.total_loss
             grad_norm = training_batch.grad_norm
+            did_optimizer_step = training_batch.did_optimizer_step
+            optimizer_step_skipped = training_batch.optimizer_step_skipped
 
             step_time = time.perf_counter() - start_time
             step_times.append(step_time)
@@ -633,20 +652,23 @@ class TrainingPipeline(LoRAPipeline, ABC):
                 "loss": f"{loss:.4f}",
                 "step_time": f"{step_time:.2f}s",
                 "grad_norm": grad_norm,
+                "did_step": did_optimizer_step,
             })
             progress_bar.update(1)
             if self.global_rank == 0:
-                wandb.log(
-                    {
-                        "train_loss": loss,
-                        "learning_rate": self.lr_scheduler.get_last_lr()[0],
-                        "step_time": step_time,
-                        "avg_step_time": avg_step_time,
-                        "grad_norm": grad_norm,
-                        "vsa_sparsity": current_vsa_sparsity,
-                    },
-                    step=step,
-                )
+                log_dict = {
+                    "train_loss": loss,
+                    "learning_rate": self.lr_scheduler.get_last_lr()[0],
+                    "step_time": step_time,
+                    "avg_step_time": avg_step_time,
+                    "grad_norm": grad_norm,
+                    "did_optimizer_step": float(did_optimizer_step),
+                    "optimizer_step_skipped": float(optimizer_step_skipped),
+                    "vsa_sparsity": current_vsa_sparsity,
+                }
+                if training_batch.flowmap_debug_metrics:
+                    log_dict.update(training_batch.flowmap_debug_metrics)
+                wandb.log(log_dict, step=step)
 
             if step % self.training_args.checkpointing_steps == 0:
                 save_checkpoint(self.transformer, self.global_rank,
