@@ -15,7 +15,7 @@ export TOKENIZERS_PARALLELISM=false
 
 MODEL_ROOT="${MODEL_ROOT:-$REPO_ROOT/local_models}"
 TRANSFORMER_MODEL_PATH="${TRANSFORMER_MODEL_PATH:-$MODEL_ROOT/hunyuanvideo_1_5/transformer/480p_i2v}"
-AR_DISTILL_ACTION_MODEL_PATH="${AR_DISTILL_ACTION_MODEL_PATH:-$MODEL_ROOT/ar_distilled_action_model/ar_distilled_action_model/model.safetensors}"
+AR_ACTION_MODEL_PATH="${AR_ACTION_MODEL_PATH:-$MODEL_ROOT/ar_model/diffusion_pytorch_model.safetensors}"
 MODEL_PATH="${MODEL_PATH:-$MODEL_ROOT/hunyuanvideo_1_5}"
 TRAIN_JSON_PATH="${TRAIN_JSON_PATH:-$REPO_ROOT/datasets/preprocessed_gamefactory_sample10_f129/dataset_index.json}"
 OUTPUT_DIR="${OUTPUT_DIR:-$MODEL_ROOT/flowmap_causal_student_train_$(date -u +%Y%m%d_%H%M%S)}"
@@ -75,7 +75,7 @@ parallel_args=(
 model_args=(
   --cls_name "HunyuanTransformer3DARActionModel"
   --load_from_dir "$TRANSFORMER_MODEL_PATH"
-  --ar_action_load_from_dir "$AR_DISTILL_ACTION_MODEL_PATH"
+  # --ar_action_load_from_dir "$AR_ACTION_MODEL_PATH"  # default: train from random init
   --model_path "$MODEL_PATH"
   --pretrained_model_name_or_path "$MODEL_PATH"
 )

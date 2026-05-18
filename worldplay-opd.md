@@ -14,7 +14,7 @@ We only focus on the **causal student** path. Bidirectional AnyFlow is useful as
 
 ## Goal
 
-Convert WorldPlay's autoregressive distilled student into a flow-map causal student that:
+Convert WorldPlay's ordinary autoregressive causal student training into a flow-map causal student training path that:
 
 1. Keeps WorldPlay's long-video generation behavior:
    - rolling chunk generation;
@@ -80,6 +80,7 @@ Current implementation status:
   - `trainer/training/ar_hunyuan_flowmap_training_pipeline.py`
   - `scripts/training/hyvideo15/run_ar_hunyuan_action_mem_flowmap.sh`
 - Reused the original WorldPlay AR/memory dataset, optimizer, checkpointing, and action/i2v conditioning.
+- Both ordinary causal training and flow-map causal training default to **random-init AR/action parameters**: `--ar_action_load_from_dir` is commented out in the launch scripts. The base HunyuanVideo transformer is still loaded from `--load_from_dir`; only the AR/action additions are random initialized.
 - Added `flowmap_*` CLI flags to `TrainingArgs`.
 - Initialized the additional `time_r_in` r-timestep embedder only when `--flowmap_training` is enabled, before FSDP wrapping, from the pretrained `time_in` weights.
 - Updated the AR transformer forward path to:
@@ -306,7 +307,6 @@ This also means that before running a longer Stage-1 flow-map training job, we s
 
 #### Priority before real Stage-1 training
 
-<details>
 <summary>Recommended order</summary>
 
 - ✅ Add explicit logging for whether `optimizer.step()` actually ran.
@@ -318,7 +318,6 @@ This also means that before running a longer Stage-1 flow-map training job, we s
 - ✅ Make the action grad-skip threshold configurable and add a debug bypass.
 - ⬜ Run a multi-step smoke and confirm at least one real optimizer update occurs.
 
-</details>
 
 ### 1.6 Stage-1 v1.1 implementation update
 
@@ -576,6 +575,44 @@ Working conclusion:
 - Before a longer real run, keep `did_optimizer_step` in the logs and decide whether production flow-map training should use the original `10.0` threshold, a higher threshold, or staged gate disabling.
 - Still run a non-diffusion sample smoke to inspect the true flow-map transition term where `t-r > 0`.
 
+#### Random-init default smoke after removing AR checkpoint loading
+
+The launch scripts now leave `--ar_action_load_from_dir` commented by default:
+
+```bash
+# --ar_action_load_from_dir "$AR_ACTION_MODEL_PATH"  # default: train from random init
+```
+
+This means the loader logs `ar_action_load_from_dir=None` and does not load `local_models/ar_model`. These default smoke runs are valid plumbing checks, but `did_optimizer_step=0` means they are **not valid parameter-update training steps**.
+
+Ordinary causal default smoke:
+
+```text
+log:                     local_models/causal_student_randominit_smoke_20260518_052642.log
+output:                  local_models/causal_student_randominit_smoke_20260518_052642
+loss:                    0.2083
+grad_norm:               11.3039
+did_optimizer_step:      0
+optimizer_step_skipped:  1
+```
+
+Flow-map causal default smoke:
+
+```text
+log:                     local_models/flowmap_causal_student_randominit_smoke_20260518_053403.log
+output:                  local_models/flowmap_causal_student_randominit_smoke_20260518_053403
+loss:                    0.5863
+grad_norm:               62.2946
+did_optimizer_step:      0
+optimizer_step_skipped:  1
+```
+
+Interpretation:
+
+- The default random-init path is wired correctly for both ordinary causal and flow-map causal training.
+- `did_optimizer_step=0` means the action grad gate skipped `optimizer.step()`, so these checkpoints are flow/backward/checkpoint sanity checks only.
+- For a real training update smoke, use either `DEBUG_DISABLE_ACTION_GRAD_SKIP=True` or a higher `ACTION_GRAD_SKIP_THRESHOLD`, and require `did_optimizer_step=1`.
+
 Summary phrase:
 
 ```text
@@ -588,7 +625,7 @@ After Stage 1 converges, we run on-policy flow-map distillation on the causal st
 
 First target: **4-step OPD**, because WorldPlay's current released `ar_distilled_action_model` is already positioned as a 4-step distilled AR model.
 
-But the distilled student must still support long video generation. OPD cannot be restricted to one isolated 5s clip if our target behavior is 30s+ interactive rollout.
+But the final distilled student must still support long video generation. OPD cannot be restricted to one isolated 5s clip if our target behavior is 30s+ interactive rollout.
 
 ### 2.1 Student in OPD
 
