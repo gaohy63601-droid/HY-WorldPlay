@@ -258,6 +258,13 @@ class _AllGather(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_, dim, group):
+        # torch 2.6+ DeviceMesh.get_group() returns None when the sub-mesh
+        # equals the full world (e.g. sp_size == NUM_GPUS). The backward then
+        # calls dist.get_group_rank(None, ...) which raises ValueError.
+        # Canonicalize None to the default world group so all downstream APIs
+        # (get_group_rank, all_gather_object) see a real ProcessGroup.
+        if group is None:
+            group = dist.distributed_c10d._get_default_group()
         ctx.dim = dim
         ctx.group = group
         world_size = dist.get_world_size(group)

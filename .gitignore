@@ -182,3 +182,15 @@ datasets/hy_preprocess/**/*.pyc
 
 
 hyvideo/utils/rewrite/i2v_env.sh
+
+# ---- ghy: exclude heavy training artifacts + raw data ----
+outputs/
+wandb/
+datasets/gamefactory_raw/
+datasets/preprocessed_gamefactory_*/
+local_models/hunyuanvideo_1_5/
+local_models/*.safetensors
+*.distcp
+*.safetensors
+.cache/
+__pycache__/

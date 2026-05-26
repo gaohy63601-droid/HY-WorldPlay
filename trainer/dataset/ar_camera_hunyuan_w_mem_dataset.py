@@ -523,89 +523,23 @@ class CameraJsonWMemDataset(Dataset):
                 w2c_list = self.camera_center_normalization(w2c_list)
                 intrinsic_list = torch.tensor(np.array(intrinsic_list))
 
-                if 'action_path' in json_data:    # prepare for dataset with action labels
-                    trans_one_hot = np.zeros((intrinsic_list.shape[0], 4), dtype=np.int32)
-                    rotate_one_hot = np.zeros((intrinsic_list.shape[0], 4), dtype=np.int32)
-                    action_json = json.load(open(json_data["action_path"], 'r'))
-                    action_keys = list(action_json.keys())
-                    for action_idx in range(1, trans_one_hot.shape[0]):
-                        t_key = action_keys[4 * (action_idx - 1) + 4]
-                        t_move_action = action_json[t_key]["move_action"]
-                        t_view_action = action_json[t_key]["view_action"]
-                        if "W" in t_move_action and "S" not in t_move_action:
-                            trans_one_hot[action_idx, 0] = 1
-                        if "S" in t_move_action and "W" not in t_move_action:
-                            trans_one_hot[action_idx, 1] = 1
-                        if "D" in t_move_action and "A" not in t_move_action:
-                            trans_one_hot[action_idx, 2] = 1
-                        if "A" in t_move_action and "D" not in t_move_action:
-                            trans_one_hot[action_idx, 3] = 1
-
-                        if t_view_action == "LR":
-                            rotate_one_hot[action_idx, 0] = 1
-                        elif t_view_action == "LL":
-                            rotate_one_hot[action_idx, 1] = 1
-                        elif t_view_action == "LU":
-                            rotate_one_hot[action_idx, 2] = 1
-                        elif t_view_action == "LD":
-                            rotate_one_hot[action_idx, 3] = 1
-
-                    trans_one_label = self.one_hot_to_one_dimension(trans_one_hot)
-                    rotate_one_label = self.one_hot_to_one_dimension(rotate_one_hot)
-                    action_for_pe = trans_one_label * 9 + rotate_one_label
-
-                else:    # prepare action labels on the fly
-                    c2ws = np.linalg.inv(w2c_list)
-                    C_inv = np.linalg.inv(c2ws[:-1])
-                    relative_c2w = np.zeros_like(c2ws)
-                    relative_c2w[0, ...] = c2ws[0, ...]
-                    relative_c2w[1:, ...] = C_inv @ c2ws[1:, ...]
-                    trans_one_hot = np.zeros((relative_c2w.shape[0], 4), dtype=np.int32)
-                    rotate_one_hot = np.zeros((relative_c2w.shape[0], 4), dtype=np.int32)
-
-                    move_norm_valid = 0.01
-                    for i in range(1, relative_c2w.shape[0]):
-                        move_dirs = relative_c2w[i, :3, 3]
-                        move_norms = np.linalg.norm(move_dirs)
-                        # compute translation angles
-                        if move_norms > move_norm_valid:
-                            move_norm_dirs = move_dirs / move_norms
-                            angles_rad = np.arccos(move_norm_dirs.clip(-1.0, 1.0))
-                            trans_angles_deg = angles_rad * (180.0 / torch.pi)
-
-                            if trans_angles_deg[2] < 60:
-                                trans_one_hot[i, 0] = 1 
-                            elif trans_angles_deg[2] > 120:
-                                trans_one_hot[i, 1] = 1
-
-                            if trans_angles_deg[0] < 60:
-                                trans_one_hot[i, 2] = 1 
-                            elif trans_angles_deg[0] > 120:
-                                trans_one_hot[i, 3] = 1 
-                        else:
-                            trans_angles_deg = torch.zeros(3)
-
-                        R_rel = relative_c2w[i, :3, :3]
-                        r = R.from_matrix(R_rel)
-                        rot_angles_deg = r.as_euler('xyz', degrees=True)
-
-                        # compute rotation angles
-                        if rot_angles_deg[1] > 5e-2:
-                            rotate_one_hot[i, 0] = 1
-                        elif rot_angles_deg[1] < -5e-2:
-                            rotate_one_hot[i, 1] = 1
-
-                        if rot_angles_deg[0] > 5e-2:
-                            rotate_one_hot[i, 2] = 1
-                        elif rot_angles_deg[0] < -5e-2:
-                            rotate_one_hot[i, 3] = 1
-
-                    trans_one_hot = torch.tensor(trans_one_hot)
-                    rotate_one_hot = torch.tensor(rotate_one_hot)
-
-                    trans_one_label = self.one_hot_to_one_dimension(trans_one_hot)
-                    rotate_one_label = self.one_hot_to_one_dimension(rotate_one_hot)
-                    action_for_pe = trans_one_label * 9 + rotate_one_label
+                # ── Action label: single source of truth = generate.py:pose_to_input ──
+                # Bypasses both legacy paths above (action.json keyboard labels w/
+                # GameFactory A/D direction bug, and the in-loader pose-derive w/
+                # move_norm_valid=0.01). Uses the EXACT inference code path on the
+                # SAME raw pose.json that pose_to_input was designed for. Result:
+                # action_label_train ≡ action_label_inference for every sample.
+                from hyvideo.generate import pose_to_input
+                fake_pose = {}
+                for i in range(latent.shape[1]):
+                    t_key = pose_keys[0] if i == 0 else pose_keys[4 * (i - 1) + 4]
+                    w2c_raw = np.array(pose_json[t_key]['w2c'])
+                    intrinsic_raw = np.array(pose_json[t_key]['intrinsic'])
+                    fake_pose[str(i)] = {
+                        "extrinsic": np.linalg.inv(w2c_raw).tolist(),
+                        "K": intrinsic_raw.tolist(),
+                    }
+                _, _, action_for_pe = pose_to_input(fake_pose, latent_num=latent.shape[1])
 
                 select_window_out_flag = 0  # whether to select the latents with length > window_frames
                 select_prob = self.rng.random()
