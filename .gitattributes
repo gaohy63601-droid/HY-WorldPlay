@@ -1,0 +1,2 @@
+ar_model_part_* filter=lfs diff=lfs merge=lfs -text
+ar_model_chunks/ar_model_part_* filter=lfs diff=lfs merge=lfs -text
